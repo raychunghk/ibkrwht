@@ -21,12 +21,15 @@ export interface RawReportRow {
 }
 
 export interface TransactionRow {
+  id?: number;
   item_type: string;
   currency: string;
   date: string;
   ticker: string;
   detail: string;
   amount: number;
+  wht_type?: string | null;
+  included_in_report?: boolean;
 }
 
 export interface ImportResult {
