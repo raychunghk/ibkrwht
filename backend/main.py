@@ -8,13 +8,14 @@ import os
 import logging
 import csv
 from contextlib import contextmanager
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Set
+from datetime import timedelta
 
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, text, Column, String, Date, Float, BigInteger
+from sqlalchemy import create_engine, text, Column, String, Date, Float, BigInteger, select
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -211,6 +212,77 @@ def generate_report_data(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
 
     return raw_data, fmt_data
 
+def identify_complete_transaction_sets(df: pd.DataFrame, time_window_days: int = 60) -> Set[int]:
+    """
+    Identifies transactions that belong to complete sets (dividend + WHT paid + WHT refunded).
+    Uses a matching algorithm that pairs dividends with their WHT transactions within a time window.
+
+    Args:
+        df: DataFrame with all transactions (must include 'id' column)
+        time_window_days: Number of days to look for matching WHT transactions
+
+    Returns:
+        Set of transaction IDs that form complete sets
+    """
+    if df.empty or 'id' not in df.columns:
+        return set()
+
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+
+    complete_ids = set()
+    matched_dividend_ids = set()
+    matched_wht_ids = set()
+
+    # Group by ticker
+    for ticker in df['ticker'].unique():
+        ticker_df = df[df['ticker'] == ticker].sort_values('date')
+
+        # Separate dividends and WHT transactions
+        dividends = ticker_df[ticker_df['item_type'] == 'Dividends'].copy()
+        wht_txns = ticker_df[ticker_df['item_type'] == 'Withholding Tax'].copy()
+
+        if dividends.empty or wht_txns.empty:
+            continue
+
+        # Match dividends with WHT transactions
+        for _, div_row in dividends.iterrows():
+            div_date = div_row['date']
+            div_id = div_row['id']
+
+            # Find WHT transactions within time window (before and after dividend)
+            window_start = div_date - timedelta(days=time_window_days)
+            window_end = div_date + timedelta(days=time_window_days)
+
+            # Get WHT transactions in this window
+            related_wht = wht_txns[
+                (wht_txns['date'] >= window_start) &
+                (wht_txns['date'] <= window_end)
+            ].copy()
+
+            if related_wht.empty:
+                continue
+
+            # Check if we have both WHT paid (negative) and WHT refunded (positive)
+            has_paid = (related_wht['amount'] < 0).any()
+            has_refund = (related_wht['amount'] > 0).any()
+
+            if has_paid and has_refund:
+                # This is a complete set
+                matched_dividend_ids.add(div_id)
+
+                # Add all related WHT transactions
+                for _, wht_row in related_wht.iterrows():
+                    matched_wht_ids.add(wht_row['id'])
+
+    # Combine all matched IDs
+    complete_ids = matched_dividend_ids.union(matched_wht_ids)
+
+    logger.info(f"Identified {len(complete_ids)} transactions in complete sets "
+                f"({len(matched_dividend_ids)} dividends, {len(matched_wht_ids)} WHT)")
+
+    return complete_ids
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -247,18 +319,78 @@ async def import_csv(file: UploadFile = File(...)):
 @app.get("/api/getreport")
 def get_report():
     with get_db_session() as db:
-        df = pd.read_sql(text("SELECT * FROM transactions WHERE currency = 'USD'"), db.bind)
-    
+        query = select(Transaction).where(Transaction.currency == 'USD')
+        result = db.execute(query)
+        rows = result.fetchall()
+
+        # Convert to list of dicts for pandas
+        df = pd.DataFrame([{
+            'id': row.id,
+            'item_type': row.item_type,
+            'currency': row.currency,
+            'date': row.date,
+            'ticker': row.ticker,
+            'detail': row.detail,
+            'amount': row.amount
+        } for row in rows])
+
+    if not df.empty:
+        # Identify complete transaction sets
+        complete_ids = identify_complete_transaction_sets(df)
+
+        # Filter to only include complete sets
+        if complete_ids:
+            df = df[df['id'].isin(complete_ids)].copy()
+            logger.info(f"Filtered to {len(df)} transactions in complete sets")
+        else:
+            logger.warning("No complete transaction sets found, report will be empty")
+            df = df.iloc[0:0]  # Empty dataframe
+
     raw, fmt = generate_report_data(df)
     return {"report": fmt, "raw": raw}
 
 @app.get("/api/detail/{ticker}")
 def get_detail(ticker: str):
     with get_db_session() as db:
-        query = text("SELECT * FROM transactions WHERE ticker = :t AND currency = 'USD' ORDER BY date DESC")
-        df = pd.read_sql(query, db.bind, params={"t": ticker.upper()})
-    
-    return {"ticker": ticker, "rows": df.to_dict(orient="records") if not df.empty else []}
+        query = select(Transaction).where(
+            Transaction.ticker == ticker.upper(),
+            Transaction.currency == 'USD'
+        ).order_by(Transaction.date.desc())
+        result = db.execute(query)
+        rows = result.fetchall()
+
+        # Convert to list of dicts for pandas
+        df = pd.DataFrame([{
+            'id': row.id,
+            'item_type': row.item_type,
+            'currency': row.currency,
+            'date': row.date,
+            'ticker': row.ticker,
+            'detail': row.detail,
+            'amount': row.amount
+        } for row in rows])
+
+    if df.empty:
+        return {"ticker": ticker, "rows": []}
+
+    # Identify complete transaction sets for this ticker
+    complete_ids = identify_complete_transaction_sets(df)
+
+    # Add metadata fields
+    df['included_in_report'] = df['id'].isin(complete_ids)
+
+    # Add WHT type field
+    df['wht_type'] = df.apply(
+        lambda row: 'Withheld' if row['item_type'] == 'Withholding Tax' and row['amount'] < 0
+        else 'Refund' if row['item_type'] == 'Withholding Tax' and row['amount'] > 0
+        else None,
+        axis=1
+    )
+
+    # Convert date to string for JSON serialization
+    df['date'] = df['date'].astype(str)
+
+    return {"ticker": ticker, "rows": df.to_dict(orient="records")}
 
 @app.get("/api/health")
 def health():

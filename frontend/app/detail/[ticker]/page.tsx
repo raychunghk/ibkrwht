@@ -37,6 +37,24 @@ const columns = [
       );
     },
   }),
+  columnHelper.accessor("wht_type", {
+    header: "WHT Type",
+    cell: (info) => {
+      const v = info.getValue();
+      if (!v) return <span className="text-gray-400">-</span>;
+      return (
+        <span
+          className={
+            v === "Withheld"
+              ? "text-red-600 font-medium"
+              : "text-blue-600 font-medium"
+          }
+        >
+          {v}
+        </span>
+      );
+    },
+  }),
   columnHelper.accessor("currency", { header: "Currency" }),
   columnHelper.accessor("detail", {
     header: "Description",
@@ -58,6 +76,23 @@ const columns = [
           ].join(" ")}
         >
           {v.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 })}
+        </span>
+      );
+    },
+  }),
+  columnHelper.accessor("included_in_report", {
+    header: "Included",
+    cell: (info) => {
+      const v = info.getValue();
+      return (
+        <span
+          className={
+            v
+              ? "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800"
+              : "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600"
+          }
+        >
+          {v ? "Yes" : "No"}
         </span>
       );
     },
@@ -102,14 +137,16 @@ export default function DetailPage() {
   });
 
   const dividends = rows
-    .filter((r) => r.item_type === "Dividends")
+    .filter((r) => r.item_type === "Dividends" && r.included_in_report)
     .reduce((s, r) => s + r.amount, 0);
   const whtPaid = rows
-    .filter((r) => r.item_type === "Withholding Tax" && r.amount < 0)
+    .filter((r) => r.item_type === "Withholding Tax" && r.amount < 0 && r.included_in_report)
     .reduce((s, r) => s + r.amount, 0);
   const whtRefunded = rows
-    .filter((r) => r.item_type === "Withholding Tax" && r.amount > 0)
+    .filter((r) => r.item_type === "Withholding Tax" && r.amount > 0 && r.included_in_report)
     .reduce((s, r) => s + r.amount, 0);
+
+  const excludedCount = rows.filter((r) => !r.included_in_report).length;
 
   const fmt = (n: number) =>
     n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -142,6 +179,12 @@ export default function DetailPage() {
             <div className="text-xs text-blue-600 font-semibold uppercase mb-1">WHT Refunded</div>
             <div className="text-lg font-bold text-blue-800">${fmt(whtRefunded)}</div>
           </div>
+        </div>
+      )}
+
+      {!loading && !error && excludedCount > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-4 py-3 text-sm">
+          ℹ️ {excludedCount} transaction{excludedCount !== 1 ? "s" : ""} excluded from report (incomplete sets)
         </div>
       )}
 
@@ -183,15 +226,25 @@ export default function DetailPage() {
               ))}
             </thead>
             <tbody className="divide-y divide-gray-100 bg-white">
-              {table.getRowModel().rows.map((row) => (
-                <tr key={row.id} className="hover:bg-gray-50">
-                  {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="px-4 py-2.5 whitespace-nowrap">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
-                </tr>
-              ))}
+              {table.getRowModel().rows.map((row) => {
+                const isIncluded = row.original.included_in_report;
+                return (
+                  <tr
+                    key={row.id}
+                    className={
+                      isIncluded
+                        ? "hover:bg-gray-50"
+                        : "bg-gray-50 opacity-60 hover:bg-gray-100"
+                    }
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <td key={cell.id} className="px-4 py-2.5 whitespace-nowrap">
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           <div className="px-4 py-2 text-xs text-gray-400 border-t border-gray-100 bg-gray-50">
