@@ -26,13 +26,29 @@ def get_db_connection():
         sys.exit(1)
 
 
+def delete_transactions():
+    """Delete all existing transaction records from the database."""
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    try:
+        cursor.execute("DELETE FROM transactions")
+        connection.commit()
+        print(f"Deleted {cursor.rowcount} existing transaction records.")
+    except Error as e:
+        print(f"Error deleting records: {e}")
+        connection.rollback()
+    finally:
+        cursor.close()
+        connection.close()
+
+
 def insert_transactions(df):
-    """Insert transaction data into the database, skipping duplicates."""
+    """Insert transaction data into the database."""
     connection = get_db_connection()
     cursor = connection.cursor()
 
     insert_query = """
-        INSERT IGNORE INTO transactions 
+        INSERT INTO transactions 
         (item_type, currency, date, ticker, detail, amount)
         VALUES (%s, %s, %s, %s, %s, %s)
     """
@@ -51,9 +67,7 @@ def insert_transactions(df):
     try:
         cursor.executemany(insert_query, records)
         connection.commit()
-        inserted = cursor.rowcount
-        skipped = len(records) - inserted
-        print(f"Successfully inserted {inserted} records ({skipped} duplicates skipped).")
+        print(f"Successfully inserted {cursor.rowcount} records.")
     except Error as e:
         print(f"Error inserting records: {e}")
         connection.rollback()
@@ -109,8 +123,8 @@ def process_csv(csv_file_path):
     print(f"Found {len(final_df)} records to process:")
     print(f"  - Dividends: {len(final_df[final_df['item type'] == 'Dividends'])}")
     print(f"  - Withholding Tax: {len(final_df[final_df['item type'] == 'Withholding Tax'])}")
-    
-    # Insert into database
+
+    delete_transactions()
     insert_transactions(final_df)
     
     return final_df
