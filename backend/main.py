@@ -297,18 +297,21 @@ async def import_csv(file: UploadFile = File(...)):
 
         inserted = 0
         with get_db_session() as db:
-            db.execute(text("DELETE FROM transactions"))
+            # Get existing detail values to avoid duplicates
+            existing = set(db.query(Transaction.detail).all())
 
             for _, row in df.iterrows():
-                db.add(Transaction(
-                    item_type=row["item_type"],
-                    currency=row["currency"],
-                    date=row["date"],
-                    ticker=row["ticker"],
-                    detail=row["detail"],
-                    amount=row["amount"]
-                ))
-                inserted += 1
+                if row["detail"] not in existing:
+                    db.add(Transaction(
+                        item_type=row["item_type"],
+                        currency=row["currency"],
+                        date=row["date"],
+                        ticker=row["ticker"],
+                        detail=row["detail"],
+                        amount=row["amount"]
+                    ))
+                    inserted += 1
+                    existing.add(row["detail"])
             db.commit()
 
         return {"status": "success", "inserted": inserted}
