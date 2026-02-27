@@ -224,35 +224,22 @@ async def import_csv(file: UploadFile = File(...)):
             return {"message": "No USD dividend/tax data found", "inserted": 0}
 
         inserted = 0
-        skipped = 0
         with get_db_session() as db:
-            # Load existing details to prevent duplicates
-            existing = {res[0] for res in db.query(Transaction.detail).all()}
-            
+            db.execute(text("DELETE FROM transactions"))
+
             for _, row in df.iterrows():
-                # IBKR sometimes uses the exact same description for tax and refund.
-                # To satisfy the DB 'unique' constraint, we append the amount if needed.
-                unique_detail = row["detail"]
-                if unique_detail in existing:
-                    # Try making it unique by appending amount
-                    unique_detail = f"{row['detail']} | {row['amount']}"
-                
-                if unique_detail not in existing:
-                    db.add(Transaction(
-                        item_type=row["item_type"],
-                        currency=row["currency"],
-                        date=row["date"],
-                        ticker=row["ticker"],
-                        detail=unique_detail,
-                        amount=row["amount"]
-                    ))
-                    existing.add(unique_detail)
-                    inserted += 1
-                else:
-                    skipped += 1
+                db.add(Transaction(
+                    item_type=row["item_type"],
+                    currency=row["currency"],
+                    date=row["date"],
+                    ticker=row["ticker"],
+                    detail=row["detail"],
+                    amount=row["amount"]
+                ))
+                inserted += 1
             db.commit()
 
-        return {"status": "success", "inserted": inserted, "skipped": skipped}
+        return {"status": "success", "inserted": inserted}
     except Exception as e:
         logger.error(f"Import failed: {e}")
         raise HTTPException(status_code=400, detail=str(e))
